@@ -119,6 +119,15 @@ defmodule TeamCalendarWeb.CalendarLiveTest do
 
     refute has_element?(view, "#more-2026-11-16")
     assert has_element?(view, "#event-#{List.last(events).id}-2026-11-15")
+
+    # An expanded week stays expanded as events are added, so it must offer a way back.
+    assert has_element?(view, "#less-2026-11-15")
+    refute has_element?(view, "#less-2026-11-08")
+
+    view |> element("#less-2026-11-15") |> render_click()
+
+    assert has_element?(view, "#more-2026-11-16", "+3 more")
+    refute has_element?(view, "#less-2026-11-15")
   end
 
   describe "drag gestures" do

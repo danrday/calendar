@@ -106,8 +106,8 @@ defmodule TeamCalendarWeb.CalendarLive do
             id={"week-#{week.start}"}
             data-week={week.start}
             data-rows={week.rows}
-            class="grid min-h-32 flex-1 grid-cols-7 border-b border-base-300"
-            style={"grid-template-rows: 2.25rem repeat(#{week.rows}, 1.5rem) 1fr"}
+            class="grid flex-1 grid-cols-7 border-b border-base-300"
+            style={"grid-template-rows: 2.25rem repeat(#{week.rows}, 1.5rem) 1fr; min-height: #{week_min_height(week)}rem"}
           >
             <button
               :for={{day, col} <- Enum.with_index(week.days, 1)}
@@ -172,6 +172,18 @@ defmodule TeamCalendarWeb.CalendarLive do
               class="mx-1 h-[1.375rem] cursor-pointer truncate rounded-full px-2 text-left text-xs opacity-60 transition hover:bg-base-200 hover:opacity-100"
             >
               +{count} more
+            </button>
+
+            <button
+              :if={week.expanded?}
+              id={"less-#{week.start}"}
+              type="button"
+              phx-click="collapse_week"
+              phx-value-week={week.start}
+              style={"grid-column: 1 / -1; grid-row: #{week.rows + 2}"}
+              class="mb-1 h-[1.375rem] cursor-pointer place-self-center rounded-full px-3 text-xs opacity-60 transition hover:bg-base-200 hover:opacity-100"
+            >
+              Show less
             </button>
           </div>
         </div>
@@ -520,6 +532,16 @@ defmodule TeamCalendarWeb.CalendarLive do
 
   def handle_event("close_form", _params, socket), do: {:noreply, close_form(socket)}
 
+  def handle_event("collapse_week", %{"week" => week}, socket) do
+    case Date.from_iso8601(week) do
+      {:ok, week} ->
+        {:noreply, socket |> update(:expanded, &MapSet.delete(&1, week)) |> assign_weeks()}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
   def handle_event("expand_week", %{"week" => week}, socket) do
     case Date.from_iso8601(week) do
       {:ok, week} ->
@@ -576,7 +598,13 @@ defmodule TeamCalendarWeb.CalendarLive do
     week = %{start: week_start, days: Enum.map(0..6, &Date.add(week_start, &1))}
 
     if lanes <= @max_lanes or MapSet.member?(expanded, week_start) do
-      Map.merge(week, %{segments: segments, rows: max(lanes, 1), more: []})
+      # Only a week that would otherwise collapse needs a "Show less" link.
+      Map.merge(week, %{
+        segments: segments,
+        rows: max(lanes, 1),
+        more: [],
+        expanded?: lanes > @max_lanes
+      })
     else
       # The last visible row is given over to the per-day "+N more" links.
       {visible, hidden} = Enum.split_with(segments, &(&1.lane < @max_lanes - 1))
@@ -587,8 +615,14 @@ defmodule TeamCalendarWeb.CalendarLive do
         |> Enum.frequencies()
         |> Enum.sort()
 
-      Map.merge(week, %{segments: visible, rows: @max_lanes, more: more})
+      Map.merge(week, %{segments: visible, rows: @max_lanes, more: more, expanded?: false})
     end
+  end
+
+  # Rows share the height evenly, but a week must never be shorter than its
+  # lanes (plus the "Show less" link), or its bars spill into the next week.
+  defp week_min_height(week) do
+    max(8, 2.25 + week.rows * 1.5 + if(week.expanded?, do: 1.75, else: 0.25))
   end
 
   defp parse_month(%{"year" => year, "month" => month}, today) do
