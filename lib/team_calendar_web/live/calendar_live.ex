@@ -105,6 +105,7 @@ defmodule TeamCalendarWeb.CalendarLive do
             :for={week <- @weeks}
             id={"week-#{week.start}"}
             data-week={week.start}
+            data-rows={week.rows}
             class="grid min-h-32 flex-1 grid-cols-7 border-b border-base-300"
             style={"grid-template-rows: 2.25rem repeat(#{week.rows}, 1.5rem) 1fr"}
           >
@@ -143,6 +144,9 @@ defmodule TeamCalendarWeb.CalendarLive do
               data-end={segment.event.ends_on}
               data-color={segment.event.color}
               data-title={segment.event.title}
+              data-col={segment.col}
+              data-span={segment.span}
+              data-lane={segment.lane}
               style={"grid-column: #{segment.col} / span #{segment.span}; grid-row: #{segment.lane + 2}"}
               class={[
                 "flex h-[1.375rem] min-w-0 cursor-pointer items-center gap-1.5 px-2 text-left text-xs font-medium transition-colors",
@@ -408,11 +412,22 @@ defmodule TeamCalendarWeb.CalendarLive do
             const last = Math.min(diffDays(drag.end, row.dataset.week), 6)
             if (first > last) return
 
+            // Sit just below every other event the ghost overlaps in this
+            // week. The last grid row is the flexible one, so cap it there.
+            let lane = 0
+            row.querySelectorAll("[data-event-id]").forEach(bar => {
+              if (bar.dataset.eventId === lifted) return
+              const col = Number(bar.dataset.col) - 1
+              const end = col + Number(bar.dataset.span) - 1
+              if (col <= last && end >= first) lane = Math.max(lane, Number(bar.dataset.lane) + 1)
+            })
+            lane = Math.min(lane, Number(row.dataset.rows))
+
             const ghost = document.createElement("div")
             ghost.dataset.ghost = ""
             ghost.className = `${GHOST} ${GHOST_COLORS[drag.color] || GHOST_COLORS.purple}`
             ghost.style.gridColumn = `${first + 1} / ${last + 2}`
-            ghost.style.gridRow = "2"
+            ghost.style.gridRow = `${lane + 2}`
             const label = document.createElement("span")
             label.className = "truncate"
             label.textContent = drag.title
