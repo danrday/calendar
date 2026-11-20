@@ -96,10 +96,15 @@ defmodule TeamCalendarWeb.CalendarLive do
           <div :for={name <- ~w(Sun Mon Tue Wed Thu Fri Sat)} class="px-2 pb-1">{name}</div>
         </div>
 
-        <div id="weeks" class="flex min-h-0 flex-1 flex-col overflow-y-auto">
+        <div
+          id="weeks"
+          phx-hook=".MonthDrag"
+          class="flex min-h-0 flex-1 select-none flex-col overflow-y-auto"
+        >
           <div
             :for={week <- @weeks}
             id={"week-#{week.start}"}
+            data-week={week.start}
             class="grid min-h-32 flex-1 grid-cols-7 border-b border-base-300"
             style={"grid-template-rows: 2.25rem repeat(#{week.rows}, 1.5rem) 1fr"}
           >
@@ -109,6 +114,7 @@ defmodule TeamCalendarWeb.CalendarLive do
               type="button"
               phx-click="new_event"
               phx-value-date={day}
+              data-date={day}
               aria-label={"New event on #{Calendar.strftime(day, "%B %-d")}"}
               style={"grid-column: #{col}; grid-row: 1 / -1"}
               class={[
@@ -132,6 +138,11 @@ defmodule TeamCalendarWeb.CalendarLive do
               type="button"
               phx-click="edit_event"
               phx-value-id={segment.event.id}
+              data-event-id={segment.event.id}
+              data-start={segment.event.starts_on}
+              data-end={segment.event.ends_on}
+              data-color={segment.event.color}
+              data-title={segment.event.title}
               style={"grid-column: #{segment.col} / span #{segment.span}; grid-row: #{segment.lane + 2}"}
               class={[
                 "flex h-[1.375rem] min-w-0 cursor-pointer items-center gap-1.5 px-2 text-left text-xs font-medium transition-colors",
@@ -229,10 +240,224 @@ defmodule TeamCalendarWeb.CalendarLive do
         </div>
       </div>
     </Layouts.app>
+
+    <%!--
+      Drag gestures for the month grid. A plain click still goes through
+      phx-click; this hook only takes over once the pointer reaches another day.
+
+        * drag from an empty day  -> "new_event" with the covered date range
+        * drag an event bar       -> "move_event" with the number of days moved
+
+      While dragging, a solid "ghost" bar previews the result. It stays until
+      the server pushes "clear_drag", so the bar never snaps back in between.
+    --%>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".MonthDrag">
+      const DAY = 86400000
+      const toMs = iso => { const [y, m, d] = iso.split("-").map(Number); return Date.UTC(y, m - 1, d) }
+      const toIso = ms => new Date(ms).toISOString().slice(0, 10)
+      const addDays = (iso, n) => toIso(toMs(iso) + n * DAY)
+      const diffDays = (a, b) => Math.round((toMs(a) - toMs(b)) / DAY)
+
+      const GHOST = "pointer-events-none z-20 mx-1 flex h-[1.375rem] min-w-0 items-center rounded-full px-2 text-xs font-semibold text-white shadow-md"
+      const GHOST_COLORS = {
+        purple: "bg-purple-500", blue: "bg-blue-500", green: "bg-green-500",
+        orange: "bg-orange-500", red: "bg-red-500", gray: "bg-gray-500"
+      }
+
+      export default {
+        mounted() {
+          this.drag = null
+          this.suppressClick = false
+
+          this.onDown = e => this.start(e)
+          this.onMove = e => this.move(e)
+          this.onUp = e => this.finish(e)
+          this.onCancel = () => this.cancel()
+          this.onKey = e => { if (e.key === "Escape") this.cancel() }
+          // After a drag the browser may still fire a click on the day or bar
+          // under the pointer; swallow it before LiveView's phx-click sees it.
+          this.onClick = e => {
+            if (!this.suppressClick) return
+            this.suppressClick = false
+            e.stopPropagation()
+            e.preventDefault()
+          }
+
+          this.el.addEventListener("pointerdown", this.onDown)
+          this.el.addEventListener("click", this.onClick, true)
+          this.handleEvent("clear_drag", () => this.clear())
+        },
+
+        updated() { this.paint() },
+        disconnected() { this.cancel() },
+        destroyed() { this.stopListening() },
+
+        // The date under a point, worked out from the grid geometry so it does
+        // not matter which bar or ghost happens to be under the pointer.
+        dateAt(x, y) {
+          const rows = [...this.el.querySelectorAll("[data-week]")]
+          if (rows.length === 0) return null
+          const row = rows.find(r => y < r.getBoundingClientRect().bottom) || rows[rows.length - 1]
+          const rect = row.getBoundingClientRect()
+          const col = Math.min(6, Math.max(0, Math.floor((x - rect.left) / (rect.width / 7))))
+          return addDays(row.dataset.week, col)
+        },
+
+        start(e) {
+          if (e.button !== 0 || !e.isPrimary || e.pointerType === "touch") return
+          this.suppressClick = false
+          const anchor = this.dateAt(e.clientX, e.clientY)
+          if (!anchor) return
+
+          const bar = e.target.closest("[data-event-id]")
+          const day = e.target.closest("[data-date]")
+
+          if (bar) {
+            this.clear()
+            this.drag = {
+              kind: "move", anchor, moved: false, done: false,
+              id: bar.dataset.eventId, title: bar.dataset.title, color: bar.dataset.color,
+              from: bar.dataset.start, to: bar.dataset.end,
+              start: bar.dataset.start, end: bar.dataset.end
+            }
+          } else if (day) {
+            this.clear()
+            this.drag = {
+              kind: "create", anchor, moved: false, done: false,
+              title: "New Event", color: "purple", start: anchor, end: anchor
+            }
+          } else {
+            return
+          }
+
+          window.addEventListener("pointermove", this.onMove)
+          window.addEventListener("pointerup", this.onUp)
+          window.addEventListener("pointercancel", this.onCancel)
+          window.addEventListener("keydown", this.onKey)
+        },
+
+        move(e) {
+          const drag = this.drag
+          if (!drag || drag.done) return
+          const date = this.dateAt(e.clientX, e.clientY)
+          if (!date) return
+          if (!drag.moved && date === drag.anchor) return
+          drag.moved = true
+
+          if (drag.kind === "move") {
+            const days = diffDays(date, drag.anchor)
+            drag.days = days
+            drag.start = addDays(drag.from, days)
+            drag.end = addDays(drag.to, days)
+          } else {
+            drag.start = date < drag.anchor ? date : drag.anchor
+            drag.end = date < drag.anchor ? drag.anchor : date
+          }
+          this.paint()
+        },
+
+        finish() {
+          const drag = this.drag
+          this.stopListening()
+          if (!drag || !drag.moved) { this.drag = null; return }
+
+          this.suppressClick = true
+          setTimeout(() => { this.suppressClick = false }, 0)
+
+          if (drag.kind === "move" && !drag.days) { this.clear(); return }
+
+          // Keep the ghost up until the server answers with "clear_drag".
+          drag.done = true
+          if (drag.kind === "move") {
+            this.pushEvent("move_event", {id: drag.id, days: drag.days})
+          } else {
+            this.pushEvent("new_event", {start: drag.start, end: drag.end})
+          }
+        },
+
+        cancel() {
+          this.stopListening()
+          this.clear()
+        },
+
+        stopListening() {
+          window.removeEventListener("pointermove", this.onMove)
+          window.removeEventListener("pointerup", this.onUp)
+          window.removeEventListener("pointercancel", this.onCancel)
+          window.removeEventListener("keydown", this.onKey)
+        },
+
+        clear() {
+          this.drag = null
+          this.paint()
+        },
+
+        // Redraws the preview from this.drag. Also runs after every server
+        // patch, because patching removes anything the server did not render.
+        paint() {
+          this.el.querySelectorAll("[data-ghost]").forEach(el => el.remove())
+          const drag = this.drag
+          const lifted = drag && drag.moved && drag.kind === "move" ? drag.id : null
+          this.el.querySelectorAll("[data-event-id]").forEach(bar => {
+            bar.style.opacity = bar.dataset.eventId === lifted ? "0.35" : ""
+          })
+          if (!drag || !drag.moved) return
+
+          this.el.querySelectorAll("[data-week]").forEach(row => {
+            const first = Math.max(diffDays(drag.start, row.dataset.week), 0)
+            const last = Math.min(diffDays(drag.end, row.dataset.week), 6)
+            if (first > last) return
+
+            const ghost = document.createElement("div")
+            ghost.dataset.ghost = ""
+            ghost.className = `${GHOST} ${GHOST_COLORS[drag.color] || GHOST_COLORS.purple}`
+            ghost.style.gridColumn = `${first + 1} / ${last + 2}`
+            ghost.style.gridRow = "2"
+            const label = document.createElement("span")
+            label.className = "truncate"
+            label.textContent = drag.title
+            ghost.appendChild(label)
+            row.appendChild(ghost)
+          })
+        }
+      }
+    </script>
     """
   end
 
   @impl true
+  # Sent by the drag hook when the pointer is released over a range of days.
+  def handle_event("new_event", %{"start" => first, "end" => last}, socket) do
+    with {:ok, first} <- Date.from_iso8601(first),
+         {:ok, last} <- Date.from_iso8601(last) do
+      [first, last] = Enum.sort([first, last], Date)
+      {:noreply, open_form(socket, %Event{starts_on: first, ends_on: last})}
+    else
+      _ -> {:noreply, push_event(socket, "clear_drag", %{})}
+    end
+  end
+
+  # Sent by the drag hook when an event bar is dropped `days` away.
+  def handle_event("move_event", %{"id" => id, "days" => days}, socket)
+      when is_integer(days) and days in -3660..3660 do
+    socket =
+      with {id, ""} <- Integer.parse(to_string(id)),
+           %Event{} = event <- Events.get_event(id),
+           {:ok, _event} <-
+             Events.update_event(event, %{
+               starts_on: Date.add(event.starts_on, days),
+               ends_on: Date.add(event.ends_on, days)
+             }) do
+        socket
+      else
+        _ -> put_flash(socket, :error, "That event could not be moved.")
+      end
+
+    # Reload now rather than waiting for the broadcast, so the reply that
+    # clears the drag preview already carries the bar in its new place.
+    {:noreply, socket |> load_events() |> push_event("clear_drag", %{})}
+  end
+
   def handle_event("new_event", %{"date" => date}, socket) do
     case Date.from_iso8601(date) do
       {:ok, date} -> {:noreply, open_form(socket, %Event{starts_on: date, ends_on: date})}
@@ -267,7 +492,7 @@ defmodule TeamCalendarWeb.CalendarLive do
 
     # The grid itself refreshes from the broadcast, like every other client.
     case result do
-      {:ok, _event} -> {:noreply, close_form(socket)}
+      {:ok, _event} -> {:noreply, socket |> close_form() |> load_events()}
       {:error, changeset} -> {:noreply, assign(socket, form: to_form(changeset))}
     end
   end
@@ -313,7 +538,10 @@ defmodule TeamCalendarWeb.CalendarLive do
     assign(socket, event: event, form: to_form(Events.change_event(event)))
   end
 
-  defp close_form(socket), do: assign(socket, event: nil, form: nil)
+  # Also clears any drag-to-create preview that was left up behind the form.
+  defp close_form(socket) do
+    socket |> assign(event: nil, form: nil) |> push_event("clear_drag", %{})
+  end
 
   defp load_events(socket) do
     {first, last} = MonthLayout.grid_range(socket.assigns.month)

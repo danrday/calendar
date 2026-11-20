@@ -120,4 +120,54 @@ defmodule TeamCalendarWeb.CalendarLiveTest do
     refute has_element?(view, "#more-2026-11-16")
     assert has_element?(view, "#event-#{List.last(events).id}-2026-11-15")
   end
+
+  describe "drag gestures" do
+    test "dragging across days opens a new event spanning them", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/month/2026/11")
+
+      render_hook(view, "new_event", %{"start" => "2026-11-25", "end" => "2026-11-27"})
+
+      assert has_element?(view, "#event-form input[name='event[starts_on]'][value='2026-11-25']")
+      assert has_element?(view, "#event-form input[name='event[ends_on]'][value='2026-11-27']")
+
+      view |> form("#event-form", event: %{title: "Three days"}) |> render_submit()
+
+      assert [%{starts_on: ~D[2026-11-25], ends_on: ~D[2026-11-27]}] =
+               Events.list_events_between(~D[2026-11-25], ~D[2026-11-27])
+
+      assert_push_event(view, "clear_drag", %{})
+    end
+
+    test "dragging backwards still gives an ordered range", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/month/2026/11")
+
+      render_hook(view, "new_event", %{"start" => "2026-11-27", "end" => "2026-11-25"})
+
+      assert has_element?(view, "#event-form input[name='event[starts_on]'][value='2026-11-25']")
+      assert has_element?(view, "#event-form input[name='event[ends_on]'][value='2026-11-27']")
+    end
+
+    test "dropping a bar on another day moves the whole event", %{conn: conn} do
+      event = create_event(starts_on: ~D[2026-11-16], ends_on: ~D[2026-11-17])
+      {:ok, view, _html} = live(conn, ~p"/month/2026/11")
+
+      render_hook(view, "move_event", %{"id" => "#{event.id}", "days" => 8})
+
+      assert_push_event(view, "clear_drag", %{})
+      refute has_element?(view, "#event-#{event.id}-2026-11-15")
+      assert has_element?(view, "#event-#{event.id}-2026-11-22[data-start='2026-11-24']")
+      assert %{starts_on: ~D[2026-11-24], ends_on: ~D[2026-11-25]} = Events.get_event(event.id)
+    end
+
+    test "moving an event that no longer exists clears the preview", %{conn: conn} do
+      event = create_event(starts_on: ~D[2026-11-16], ends_on: ~D[2026-11-17])
+      {:ok, view, _html} = live(conn, ~p"/month/2026/11")
+      {:ok, _event} = Events.delete_event(event)
+
+      render_hook(view, "move_event", %{"id" => "#{event.id}", "days" => 1})
+
+      assert_push_event(view, "clear_drag", %{})
+      assert Events.get_event(event.id) == nil
+    end
+  end
 end
